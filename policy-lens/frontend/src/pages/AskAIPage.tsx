@@ -94,7 +94,7 @@ export default function AskAIPage() {
             <p className="font-semibold text-amber-900">Ask AI needs a Google API key</p>
             <p className="mt-1 text-amber-900/90">
               Set <code className="rounded bg-amber-100/80 px-1.5 py-0.5 font-mono text-xs">GOOGLE_API_KEY</code>{" "}
-              in <code className="rounded bg-amber-100/80 px-1.5 py-0.5 font-mono text-xs">policy-lens/backend/.env</code>{" "}
+              in <code className="rounded bg-amber-100/80 px-1.5 py-0.5 font-mono text-xs">backend/.env</code>{" "}
               (copy from <code className="rounded bg-amber-100/80 px-1.5 py-0.5 font-mono text-xs">.env.template</code>
               ), use a key from{" "}
               <a

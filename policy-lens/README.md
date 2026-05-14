@@ -1,7 +1,7 @@
 # Policy Lens
 > 🏆 Winner · Innovation Hacks 2.0 · Arizona State University · April 2026
 
-![Alt Text](https://github.com/SuhasR3/Policy-Lens/blob/main/policy-lens/demo.jpeg)
+![Alt Text](https://github.com/SuhasR3/Policy-Lens/blob/main/frontend/demo.jpeg)
 
 **Real-time drug coverage intelligence for market access analysts.**
 

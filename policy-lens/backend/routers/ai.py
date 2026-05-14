@@ -50,7 +50,7 @@ class ChatRequest(BaseModel):
 
 @router.get("/status")
 async def ai_status():
-    """Ask AI is ready when GOOGLE_API_KEY is set in policy-lens/backend/.env (see .env.template)."""
+    """Ask AI is ready when GOOGLE_API_KEY is set in backend/.env (see .env.template)."""
     key = (GEMINI_API_KEY or "").strip()
     return {"ask_ai_ready": bool(key)}
 

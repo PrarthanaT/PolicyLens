@@ -2,7 +2,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# Load policy-lens/backend/.env before routers read GOOGLE_API_KEY
+# Load ./backend/.env before routers read GOOGLE_API_KEY
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
 from fastapi import FastAPI
