@@ -3,155 +3,142 @@
 
 > 🏆 Winner · Innovation Hacks 2.0 · Arizona State University · April 2026
 
-Search, compare, and query medical benefit drug coverage policies across multiple health insurance payers through a single interface. Ingest payer PDFs once; query the normalized data through a comparison UI or a streaming natural language chat that runs structured retrieval against a SQLite schema.
+The 2 AM problem this solves
 
----
+Picture a market access analyst at 4pm on a Thursday. A client emails: "Does Cigna require step therapy before approving Humira, and has that changed recently?"
 
-<img width="800" height="446" alt="PolicyLens" src="https://github.com/user-attachments/assets/511f972d-e853-467f-95a9-36d614d05bfa" />
+To answer, the analyst opens Cigna's PDF. Then UHC's, in case the client asks next. Then Florida Blue's. Each document is structured differently — some are clean single-drug policies, others are 40-page omnibus documents covering hundreds of drugs at once. There's no shared schema, no shared vocabulary, no way to query across them. The analyst reads, copies values into a spreadsheet by hand, and hopes nothing changed since the last time they checked.
 
-**Full Video:** [link](https://www.youtube.com/watch?v=ZK5N2csVXVo)
+That manual loop — discover the document, read it, normalize it, repeat per payer — is the entire bottleneck. PolicyIQ removes the middle two steps. Ingest a PDF once, and an LLM extraction pipeline pushes it into a normalized SQLite schema. From that point on, "what does Cigna require for Humira" isn't a reading exercise — it's a query.
 
----
 
-## The problem
+How it actually works, in four steps
 
-Health plans publish drug coverage policies as inconsistent, frequently changing documents scattered across hundreds of payer portals. Answering "what does Cigna require for Humira?" means opening multiple PDFs and manually normalizing each one. That takes hours.
 
-Policy Lens centralizes payer policies into a structured schema and exposes them through a comparison UI and a chat interface. Each new payer document goes through an LLM powered extraction pipeline and lands in the same normalized tables, so cross payer comparison becomes a SQL query instead of a manual reading exercise.
+Drop in a PDF. pdfplumber pulls the raw text page by page.
+Gemini 2.0 Flash extracts structure. A zero-shot JSON-schema prompt (temperature 0.1) turns unstructured policy text into rows — drug name, access status, prior auth flag, step therapy flag, indications, dosing limits.
+Rows land in shared tables. Every payer's data — regardless of how their PDF was originally formatted — ends up in the same drugs, policies, covered_indications, and step_therapy tables.
+Query it any way you want. Through a comparison grid, a friction heatmap, or a chat box that runs structured SQL retrieval against the schema in real time.
 
----
 
-## What makes this interesting
 
-**Schema grounded retrieval, not vector RAG.** Keyword extraction on the query fires up to four parallel parameterized SQL queries across the policy tables and assembles up to 15K chars of structured context before calling Gemini, grounded in the schema rather than chunk similarity. On named structured fields at this scale, exact and LIKE matching beats embeddings and ships no vector store to operate.
+What's on screen
 
-**Streaming responses over SSE.** FastAPI `StreamingResponse` emits `data: {...}` chunks; the frontend stitches them with a `ReadableStream` line buffer that holds partial frames across network reads.
+Drug Lookup — Type a drug, generic, or brand name. Get back per-payer cards: access status, PA flag, step therapy flag, HCPCS code, effective date. A trending strip surfaces the drugs with the most payer coverage entries, so analysts see what's actively being discussed across the index.
 
-**LLM powered ingestion pipeline.** Drop a PDF, `pdfplumber` pulls text page by page, `gemini-2.0-flash` runs a zero shot JSON schema extraction at `temperature=0.1`, and structured drug rows insert straight into the normalized schema. No regex parsers, no per payer adapters.
+PA Friction Heatmap — The screen that does the most work for the least typing. A payer × drug grid where every cell is a friction score, not a binary yes/no. Three switchable lenses on the same grid: PA Friction Score (1–10), Step Therapy Burden (number of drugs a patient must fail first), and Approval Time (days). Row-level averages and auto-generated "highest burden" / "lowest burden" callouts turn a spreadsheet-shaped problem into something scannable in five seconds.
 
-**One schema for heterogeneous documents.** Two document types feed a single `drugs` table; two SQL views use COALESCE chains to resolve `drug_name` and `hcpcs_code` so every downstream query reads clean fields and never knows which document type a row came from.
+Multi-Drug Coverage Matrix — A chip-style input with autocomplete (kicks in after two characters). Add several drugs at once and get a { payers, drugs } grid back. A payer card only goes green if it covers every drug in the set — useful when a client's formulary question is really "do you cover this whole regimen," not just one drug.
 
-**UI engineering as the product.** The comparison surface and PA Friction Heatmap collapse a high dimensional payer by drug matrix into a scannable view: color graded cells, switchable lenses, row level aggregates, and auto surfaced highest and lowest burden callouts.
+Payer Comparison View — One column per payer, six rows per drug (Coverage Status, Prior Auth, Step Therapy, Site of Care, Indications, Dosing/Quantity), plus four summary metrics at the top: payer coverage count, total entries, Clinical Variance (the ratio of PA-required drugs), and the Market Access Score.
 
-**Cross payer Market Access Score.** A 0 to 100 friction score per payer, `round((1 - restriction_score / max_possible) * 100)`, summing PA, step therapy, and site of care drug counts. Lower means more friction.
+Ask AI — A streaming chat interface, but the retrieval underneath is intentionally not vector search (more on that below). Suggested prompts aren't hardcoded — three random drugs and two random payers get pulled from the live database on page load, so the suggestions always reflect what's actually in the index.
 
----
+Policy Changes Feed — A timeline of every revision stored in the policy_changes JSON column. Each change gets a severity tag — Clinical, Notable, Moderate, Minor — assigned via keyword matching, and the feed is filterable by severity so an analyst can mute the noise and only see what's clinically meaningful.
 
-## Architecture
+Policy Ingestion — Drag a PDF in, optionally hint the payer name, and the extraction pipeline does the rest. Returns the extracted drug count and policy title so you know immediately whether the ingest worked.
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│  React 19 + Vite 8 + React Router 7 + TanStack Query 5              │
-│  Pages: DrugLookup, Comparison, Heatmap, AskAI,                     │
-│         PolicyChanges, Ingest, Library                              │
-│  api.ts ── fetch() / SSE ReadableStream                             │
-└──────────────────────────┬──────────────────────────────────────────┘
-                           │ /api/*  (Vite proxy → :8000)
-┌──────────────────────────▼──────────────────────────────────────────┐
-│  FastAPI + uvicorn                                                  │
-│                                                                     │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌─────────┐    │
-│  │ drugs.py │ │compare.py│ │policies  │ │ingest.py │ │  ai.py  │    │
-│  └────┬─────┘ └────┬─────┘ └────┬─────┘ └────┬─────┘ └────┬────┘    │
-│       │            │            │            │            │         │
-│  ┌────▼────────────▼────────────▼────────────▼────────────▼─────┐   │
-│  │  aiosqlite ── db/policies.db                                  │  │
-│  │  Tables: policies, drugs, covered_indications,                │  │
-│  │          step_therapy, dosing_limits, excluded_indications    │  │
-│  │  Views:  drugs_unified, drug_access_summary                   │  │
-│  └───────────────────────────────────────────────────────────────┘  │
-│                                                                     │
-│  AsyncOpenAI ──► generativelanguage.googleapis.com/v1beta/openai/   │
-│                  model: gemini-2.0-flash                            │
-└─────────────────────────────────────────────────────────────────────┘
-          │ pdfplumber (sync, in process)
-          ▼
-     Uploaded PDFs (temp files, deleted after extraction)
-```
+Policy Library — The indexed-policies table with aggregate counts (total drugs, PA-required drugs, step-therapy drugs) computed via LEFT JOIN ... GROUP BY.
 
-### How the chat retrieval works
 
-```
-User submits message
-  → POST /api/ai/chat  { messages, stream: true }
-  → _build_context(last_user_message):
-       1. Tokenize, filter stopwords, take first 5 terms
-       2. LIKE query: drugs_unified (drug, generic, brand, category, hcpcs)
-       3. LIKE query: covered_indications
-       4. LIKE query: step_therapy
-       5. SELECT * FROM policies, plus COUNT aggregates
-       6. Concatenate sections, truncate to 15K chars
-  → messages = [system: SYSTEM_PROMPT, system: DB_CONTEXT, ...user history]
-  → AsyncOpenAI → gemini-2.0-flash, stream=True
-  → StreamingResponse emits "data: {...}\n\n" chunks
-  → Frontend SSE reader buffers and appends to assistant message
-```
+Engineering notes — the decisions worth defending
 
----
+Schema-grounded retrieval, not vector RAG. This is the one decision a judge is most likely to push back on, so here's the reasoning: when your fields are named and structured — drug_name, payer, step_therapy_required — keyword LIKE matching against those columns beats chunk-similarity search, because you're not searching prose, you're searching a database. The chat endpoint tokenizes the user's message, strips stopwords, takes the first five meaningful terms, and fires up to four parallel parameterized SQL queries across drugs_unified, covered_indications, and step_therapy. The results get concatenated into up to 15K characters of structured context, which gets handed to Gemini alongside the system prompt. No embeddings, no vector store, no infrastructure to stand up or keep in sync. At this scale and with this field structure, it's the simpler and more accurate choice — though it's also the first thing that needs to change if the corpus grows past roughly 10K records (see Limitations).
 
-## Features
+One schema, two very different document shapes. Some payers publish one drug per PDF. Others — looking at you, Priority Health — bury 40+ drugs inside a single omnibus document. Rather than building per-payer parsing adapters, both document shapes get extracted into the same drugs table. Two SQL views (drugs_unified, drug_access_summary) use COALESCE chains to resolve drug_name and hcpcs_code, so every downstream consumer — the comparison page, the heatmap, the chat retriever — reads clean, consistent fields and has no idea which document shape a given row originally came from.
 
-**Drug Lookup.** Search by drug, generic, or brand name. Returns per payer coverage cards with access status, prior auth flag, step therapy flag, effective date, and HCPCS code. A trending bar shows the top drugs by number of payers listing them.
+Streaming via Server-Sent Events, not WebSockets. FastAPI's StreamingResponse emits data: {...}\n\n chunks. The frontend reads these with a ReadableStream line-buffer that holds partial frames across network reads — necessary because a single network read doesn't guarantee you get a complete SSE frame. SSE was chosen over WebSockets because the chat is one-directional (server → client) once the request is sent; no need for the bidirectional complexity.
 
-**Multi Drug Coverage Matrix.** Chip input with autocomplete (active after 2 characters). Type multiple drugs; receive a `{ payers, drugs }` grid showing per payer coverage across the full set. Payer cards turn green only when the payer covers every selected drug.
+A friction score that's actually a formula, not a vibe. The Market Access Score is round((1 - restriction_score / max_possible) * 100), where restriction_score sums PA requirements, step therapy counts, and site-of-care restrictions across a payer's drug list. Lower score, more friction. It's a simple weighted formula, deliberately — explainable to a non-technical analyst beats a black-box model nobody can sanity-check on day one.
 
-**Payer Comparison View.** One column per payer, six rows per drug: Coverage Status, Prior Auth, Step Therapy, Site of Care, Indications (first 3), Dosing/Quantity. Four summary metrics: Payer Coverage count, total entries, Clinical Variance (PA ratio), Market Access Score.
+The UI is part of the technical story, not just decoration. Collapsing a payer-by-drug matrix that's genuinely high-dimensional into something a human reads in one glance — color-graded cells, switchable lenses, row aggregates, auto-surfaced "worst offender" callouts — is itself an engineering problem, not just a styling pass.
 
-**Ask AI.** Streaming chat over the normalized policy database. Suggested prompts are generated dynamically from live data (3 random drugs and 2 random payers picked from the DB on page load). Responses render incrementally as the stream arrives.
 
-**PA Friction Heatmap.** A data visualization surface that renders payer friction across three switchable lenses: PA Friction Score (1 to 10), Step Therapy Burden (number of required prior drugs), and Approval Time (days). Color graded cells, per row averages, and highest and lowest burden insight cards per view turn a dense payer by drug matrix into a view an analyst reads without a spreadsheet.
+System layout
 
-**Policy Changes Feed.** Timeline view of all policy revisions stored in the `policy_changes` JSON column. Severity is classified by keyword matching: Clinical, Notable, Moderate, Minor. Filterable by severity.
+                     React 19 + Vite 8 + React Router 7 + TanStack Query 5
+                     ─────────────────────────────────────────────────────
+                     7 routed pages: Drug Lookup · Comparison · Heatmap ·
+                                     Ask AI · Policy Changes · Ingest · Library
+                     api.ts handles fetch() calls + the SSE ReadableStream reader
+                                          │
+                                          │  /api/*  (Vite dev proxy → :8000)
+                                          ▼
+                     FastAPI + uvicorn
+                     ─────────────────────────────────────────────────────
+                     drugs.py · compare.py · policies.py · ingest.py · ai.py
+                                          │
+                                          ▼
+                     aiosqlite  →  db/policies.db
+                     Tables:  policies, drugs, covered_indications,
+                              step_therapy, dosing_limits, excluded_indications
+                     Views:   drugs_unified, drug_access_summary
+                                          │
+                                          ▼
+                     AsyncOpenAI client → Gemini 2.0 Flash
+                     (via the OpenAI-compatible endpoint on
+                      generativelanguage.googleapis.com)
 
-**Policy Ingestion.** Drag and drop PDF upload with optional payer hint. `pdfplumber` extracts text page by page, truncated to 15K chars and sent to `gemini-2.0-flash` with a JSON schema extraction prompt. Result rows insert into `policies`, `drugs`, and `covered_indications` in one transaction. Returns extracted drug count and policy title.
+     Separately:  pdfplumber runs synchronously, in-process, against
+                  uploaded PDFs (temp files, deleted post-extraction)
 
-**Policy Library.** Indexed policies table with aggregate counts (drugs, PA drugs, step therapy drugs) via `LEFT JOIN ... GROUP BY p.id`.
 
----
+Inside a single chat turn
 
-## Stack
+1. User sends a message
+2. POST /api/ai/chat   { messages, stream: true }
+3. _build_context(last_user_message):
+     a. tokenize → strip stopwords → keep first 5 terms
+     b. LIKE query against drugs_unified (drug / generic / brand / category / hcpcs)
+     c. LIKE query against covered_indications
+     d. LIKE query against step_therapy
+     e. SELECT * FROM policies, plus COUNT() aggregates
+     f. concatenate all of the above, truncate to 15K chars
+4. messages = [system: SYSTEM_PROMPT, system: DB_CONTEXT, ...full chat history]
+5. AsyncOpenAI → gemini-2.0-flash, stream=True
+6. StreamingResponse yields "data: {...}\n\n" chunks
+7. Frontend's SSE reader buffers partial frames, appends tokens to the
+   in-progress assistant message as they arrive
 
-| Layer | Technology |
-|---|---|
-| Frontend | React 19, TypeScript, Vite 8, Tailwind CSS 4 |
-| Routing | react-router-dom 7 |
-| Server state | TanStack React Query 5 |
-| Backend | FastAPI, uvicorn, aiosqlite |
-| Database | SQLite |
-| LLM | Google Gemini 2.0 Flash (via OpenAI compatible endpoint) |
-| PDF parsing | pdfplumber |
-| Streaming | Server Sent Events over `StreamingResponse` |
 
----
+Stack, by layer
 
-## Scope
+LayerChoiceFrontend frameworkReact 19 + TypeScriptBuild toolVite 8Routingreact-router-dom 7Server stateTanStack React Query 5StylingTailwind CSS 4Backend frameworkFastAPI + uvicornDatabase driveraiosqliteDatabaseSQLiteLLMGemini 2.0 Flash (OpenAI-compatible endpoint)PDF parsingpdfplumberStreaming protocolServer-Sent Events via StreamingResponse
 
-Hackathon prototype, 36 hour build. The ingestion pipeline, schema grounded retrieval, streaming chat, and comparison UI all work end to end against the live database. Production hardening was out of scope for the build.
 
-**Current demo dataset:** 5 pre ingested policies (Blue Cross NC, Cigna, Florida Blue, Priority Health, UnitedHealthcare Commercial) covering 1,512 drug records. The ingestion pipeline accepts new PDFs and writes to the same schema, so the dataset grows with each upload.
+What's actually in the database right now
 
-**Known limitations:**
+This was built in a 36-hour window, so "production-grade" was never the bar — "works end-to-end against a real database with real extracted data" was. And it does: ingestion, schema-grounded retrieval, streaming chat, and the comparison UI all run against a live SQLite instance, not mocked responses.
 
-- No authentication or rate limiting. Single tenant, single process.
-- No vector store or semantic search. Retrieval is keyword LIKE queries with leading and trailing wildcards (full table scans). No indexes defined beyond implicit rowids.
-- 15K character truncation drops content from long multi page documents.
-- `policy_changes` date sort is lexicographic on mixed format strings; ordering is unreliable.
+Currently seeded with 5 ingested policies — Blue Cross NC, Cigna, Florida Blue, Priority Health, and UnitedHealthcare Commercial — covering 1,512 individual drug records. The ingestion endpoint is live, so dropping in a 6th payer's PDF grows the dataset on the spot; nothing about the schema assumes a fixed payer list.
 
-**Production roadmap:**
 
-1. Auth and per tenant API keys.
-2. btree indexes on `drugs.drug_name_normalized`, `drugs.payer`, and `policies.payer` for sublinear search.
-3. Replace LIKE wildcard retrieval with FTS5 or a hybrid keyword plus vector retriever once the corpus exceeds ~10K records.
-4. Background task queue for ingestion (Celery or arq); the upload endpoint currently blocks on Gemini.
-5. Bounded request size, structured logging, per step latency metrics.
+Where this would break first at scale (said out loud, on purpose)
 
----
+A demo that pretends to have no weaknesses is less convincing than one that knows exactly where the edges are:
 
-## Getting Started
 
-```bash
-git clone https://github.com/SuhasR3/Policy-Lens.git
-cd Policy-Lens
+No auth, no rate limiting. Single-tenant, single-process, by design for a 36-hour build.
+Retrieval is LIKE with wildcards on both sides — full table scans, no indexes beyond implicit rowids. Fine at 1,512 rows. Not fine at 100,000.
+The 15K character context cap will silently drop content from long, multi-page documents once a policy's relevant text exceeds that budget.
+policy_changes sorts dates lexicographically on mixed-format strings. Ordering is correct often enough to demo, not reliable enough to trust.
+
+
+What production hardening would actually look like
+
+
+Auth, plus per-tenant API keys.
+B-tree indexes on drugs.drug_name_normalized, drugs.payer, and policies.payer — turns the full scans above into sublinear lookups.
+Swap wildcard LIKE retrieval for FTS5, or a hybrid keyword + vector retriever once the corpus crosses roughly 10K records and pure keyword matching starts missing semantically related but lexically different terms.
+Move ingestion off the request thread and into a background queue (Celery or arq) — right now the upload endpoint blocks on the Gemini call, which is fine for a demo and not fine for a second concurrent upload.
+Bounded request sizes, structured logging, per-step latency metrics.
+
+
+
+Running it yourself
+
+bashgit clone https://github.com/PrarthanaT/PolicyLens.git
+cd PolicyLens
 
 # Backend
 cd backend
@@ -161,46 +148,43 @@ cp .env.template .env
 # add GOOGLE_API_KEY to .env
 uvicorn main:app --reload
 
-# Frontend (new terminal)
+# Frontend — separate terminal
 cd frontend
 npm install
 npm run dev
-```
 
-Open [http://localhost:5173](http://localhost:5173). The Vite dev server proxies `/api/*` to `localhost:8000`.
+Visit http://localhost:5173. Vite's dev server proxies /api/* through to localhost:8000, so both halves need to be running.
 
-Get a Gemini API key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey).
+Grab a free Gemini key at aistudio.google.com/apikey if you don't already have one.
 
----
 
-## Project Structure
+Repo map
 
-```
 backend/
-├── main.py                       # FastAPI entry point, CORS, router mounting
-├── database.py                   # aiosqlite connection manager
+├── main.py                       FastAPI entry point, CORS, router mounting
+├── database.py                   aiosqlite connection manager
 └── routers/
-    ├── drugs.py                  # Drug search, coverage matrix, autocomplete
-    ├── compare.py                # Payer comparison, summary metrics
-    ├── policies.py               # Policy list, changes feed
-    ├── ingest.py                 # PDF upload, LLM extraction, DB insert
-    └── ai.py                     # Chat endpoint, retrieval context builder, SSE streaming
+    ├── drugs.py                  Drug search, coverage matrix, autocomplete
+    ├── compare.py                Payer comparison, summary metrics
+    ├── policies.py               Policy list, changes feed
+    ├── ingest.py                 PDF upload → LLM extraction → DB insert
+    └── ai.py                     Chat endpoint, context builder, SSE streaming
 
 frontend/src/
-├── App.tsx                       # Client routing (7 routes)
+├── App.tsx                       Client-side routing, 7 routes
 ├── lib/
-│   ├── api.ts                    # All HTTP calls, SSE reader
-│   └── types.ts                  # TypeScript interfaces
+│   ├── api.ts                    All HTTP calls + the SSE stream reader
+│   └── types.ts                  Shared TypeScript interfaces
 ├── pages/
-│   ├── DrugLookupPage.tsx        # Search + trending + multi drug grid
-│   ├── ComparisonPage.tsx        # Per payer comparison table
-│   ├── AskAIPage.tsx             # Streaming chat interface
-│   ├── PAFrictionHeatmapPage.tsx # Payer by drug friction grid
-│   ├── PolicyChangesPage.tsx     # Changes timeline
-│   ├── IngestPage.tsx            # PDF upload UI
-│   └── LibraryPage.tsx           # Indexed policies table
-└── components/layout/            # SideNavBar, TopAppBar, FloatingAIButton
+│   ├── DrugLookupPage.tsx        Search + trending strip + multi-drug grid
+│   ├── ComparisonPage.tsx        Per-payer comparison table
+│   ├── AskAIPage.tsx             Streaming chat interface
+│   ├── PAFrictionHeatmapPage.tsx Payer-by-drug friction grid, 3 lenses
+│   ├── PolicyChangesPage.tsx     Severity-tagged changes timeline
+│   ├── IngestPage.tsx            Drag-and-drop PDF upload
+│   └── LibraryPage.tsx           Indexed-policies table with aggregates
+└── components/layout/            SideNavBar, TopAppBar, FloatingAIButton
 
 db/
-└── policies.db                   # Pre seeded SQLite database
+└── policies.db                   Pre-seeded SQLite database
 ```
